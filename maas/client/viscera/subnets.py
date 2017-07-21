@@ -108,7 +108,7 @@ class Subnet(Object, metaclass=SubnetType):
     cidr = ObjectField.Checked(
         "cidr", check(str), readonly=True)
     name = ObjectField.Checked(
-        "name", check(str), readonly=True)
+        "name", check(str))
 
     # description is allowed in the create call and displayed in the UI
     # but never returned by the API
@@ -124,6 +124,10 @@ class Subnet(Object, metaclass=SubnetType):
     gateway_ip = ObjectField.Checked("gateway_ip", check_optional(str))
     rdns_mode = ObjectField.Checked("rdns_mode", to(RDNSMode))
     dns_servers = ObjectField.Checked("dns_servers", check(list))
+
+    def __repr__(self):
+        return super(Subnet, self).__repr__(
+            fields={"cidr", "name", "vlan"})
 
     async def delete(self):
         """Delete this Subnet."""

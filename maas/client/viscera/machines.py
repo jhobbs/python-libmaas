@@ -7,6 +7,7 @@ __all__ = [
 
 import asyncio
 import base64
+import bson
 from collections import Sequence
 from http import HTTPStatus
 import typing
@@ -20,6 +21,7 @@ from . import (
     ObjectFieldRelatedSet,
     ObjectSet,
     ObjectType,
+    to,
 )
 from ..bones import CallError
 from ..enum import NodeStatus
@@ -36,10 +38,56 @@ class MachinesType(ObjectType):
         data = await cls._handler.read()
         return cls(map(cls._object, data))
 
+    async def create(
+            cls, architecture: str, mac_addresses: typing.Sequence[str],
+            power_type: str,
+            power_parameters: typing.Mapping[str, typing.Any]=None, *,
+            subarchitecture: str=None, min_hwe_kernel: str=None,
+            hostname: str=None, domain: typing.Union[int, str]=None):
+        """
+        Create a new machine.
+
+        :param architecture: The architecture of the machine (required).
+        :type architecture: `str`
+        :param mac_addresses: The MAC address of the machine (required).
+        :type mac_addresses: sequence of `str`
+        :param power_type: The power type of the machine (required).
+        :type power_type: `str`
+        :param power_parameters: The power parameters for the machine
+            (optional).
+        :type power_parameters: mapping of `str` to any value.
+        :param subarchitecture: The subarchitecture of the machine (optional).
+        :type subarchitecture: `str`
+        :param min_hwe_kernel: The minimal HWE kernel for the machine
+            (optional).
+        :param hostname: The hostname for the machine (optional).
+        :type hostname: `str`
+        :param domain: The domain for the machine (optional).
+        :type domain: `int` or `str`
+        """
+        params = {
+            "architecture": architecture,
+            "mac_addresses": mac_addresses,
+            "power_type": power_type,
+        }
+        if power_parameters is not None:
+            params["power_parameters"] = power_parameters
+        if subarchitecture is not None:
+            params["subarchitecture"] = subarchitecture
+        if min_hwe_kernel is not None:
+            params["min_hwe_kernel"] = min_hwe_kernel
+        if hostname is not None:
+            params["hostname"] = hostname
+        if domain is not None:
+            params["domain"] = domain
+        return cls._object(await cls._handler.create(**params))
+
     async def allocate(
             cls, *, hostname: str=None, architecture: str=None, cpus: int=None,
             memory: float=None, tags: typing.Sequence[str]=None):
         """
+        Allocate a machine.
+
         :param hostname: The hostname to match.
         :param architecture: The architecture to match, e.g. "amd64".
         :param cpus: The minimum number of CPUs to match.
@@ -102,12 +150,20 @@ class RescueModeFailure(MAASException):
     """Machine failed to perform a Rescue mode transition."""
 
 
+class FailedCommissioning(MAASException):
+    """Machine failed to commission."""
+
+
+class FailedTesting(MAASException):
+    """Machine failed testing."""
+
+
 class FailedDeployment(MAASException):
-    """Machine failed to Deploy."""
+    """Machine failed to deploy."""
 
 
 class FailedReleasing(MAASException):
-    """Machine failed to Release."""
+    """Machine failed to release."""
 
 
 class FailedDiskErasing(MAASException):
@@ -172,7 +228,7 @@ class Machine(Object, metaclass=MachineType):
     # storage
 
     status = ObjectField.Checked(
-        "status", check(int), readonly=True)
+        "status", to(NodeStatus), readonly=True)
     status_action = ObjectField.Checked(
         "status_action", check_optional(str), readonly=True)
     status_message = ObjectField.Checked(
@@ -190,6 +246,95 @@ class Machine(Object, metaclass=MachineType):
     # virtualblockdevice_set
 
     zone = ObjectFieldRelated("zone", "Zone")
+
+    async def get_power_parameters(self):
+        """Get the power paramters for this machine."""
+        data = await self._handler.power_parameters(system_id=self.system_id)
+        return data
+
+    async def abort(self, *, comment: str=None):
+        """Abort the current action.
+
+        :param comment: Reason for aborting the action.
+        :param type: `str`
+        """
+        params = {
+            "system_id": self.system_id
+        }
+        if comment:
+            params["comment"] = comment
+        self._data = await self._handler.abort(**params)
+        return self
+
+    async def clear_default_gateways(self):
+        """Clear default gateways."""
+        self._data = await self._handler.clear_default_gateways(
+            system_id=self.system_id)
+        return self
+
+    async def commission(
+            self, *, enable_ssh: bool=None, skip_networking: bool=None,
+            skip_storage: bool=None,
+            commissioning_scripts: typing.Sequence[str]=None,
+            testing_scripts: typing.Sequence[str]=None,
+            wait: bool=False, wait_interval: int=5):
+        """Commission this machine.
+
+        :param enable_ssh: Prevent the machine from powering off after running
+            commissioning scripts and enable your user to SSH into the machine.
+        :type enable_ssh: `bool`
+        :param skip_networking: Skip updating the MAAS interfaces for the
+            machine.
+        :type skip_networking: `bool`
+        :param skip_storage: Skip update the MAAS block devices for the
+            machine.
+        :type skip_storage: `bool`
+        :param commissioning_scripts: List of extra commisisoning scripts
+            to run. If the name of the commissioning scripts match a tag, then
+            all commissioning scripts with that tag will be used.
+        :type commissioning_scripts: sequence of `str`
+        :param testing_scripts: List of testing scripts to run after
+            commissioning. By default a small set of testing scripts will run
+            by default. Passing empty list will disable running any testing
+            scripts during commissioning. If the name of the testing scripts
+            match a tag, then all testing scripts with that tag will be used.
+        :type testing_scripts: sequence of `str`
+        :param wait: If specified, wait until the commissioning is complete.
+        :param wait_interval: How often to poll, defaults to 5 seconds
+        """
+        params = {"system_id": self.system_id}
+        if enable_ssh is not None:
+            params["enable_ssh"] = enable_ssh
+        if skip_networking is not None:
+            params["skip_networking"] = skip_networking
+        if skip_storage is not None:
+            params["skip_storage"] = skip_storage
+        if (commissioning_scripts is not None and
+                len(commissioning_scripts) > 0):
+            params["commissioning_scripts"] = ",".join(commissioning_scripts)
+        if testing_scripts is not None:
+            if len(testing_scripts) == 0:
+                params["testing_scripts"] = ""
+            else:
+                params["testing_scripts"] = ",".join(testing_scripts)
+        self._data = await self._handler.commission(**params)
+        if not wait:
+            return self
+        else:
+            # Wait for the machine to be fully commissioned.
+            while self.status in [
+                    NodeStatus.COMMISSIONING, NodeStatus.TESTING]:
+                await asyncio.sleep(wait_interval)
+                self._data = await self._handler.read(system_id=self.system_id)
+            if self.status == NodeStatus.FAILED_COMMISSIONING:
+                msg = "{system_id} failed to commission.".format(
+                    system_id=self.system_id)
+                raise FailedCommissioning(msg, self)
+            if self.status == NodeStatus.FAILED_TESTING:
+                msg = "{system_id} failed testing.".format(
+                    system_id=self.system_id)
+                raise FailedTesting(msg, self)
+            return self
 
     async def deploy(
             self, user_data: typing.Union[bytes, str]=None,
@@ -222,60 +367,20 @@ class Machine(Object, metaclass=MachineType):
             params["hwe_kernel"] = hwe_kernel
         if comment is not None:
             params["comment"] = comment
-        data = await self._handler.deploy(**params)
+        self._data = await self._handler.deploy(**params)
         if not wait:
-            return type(self)(data)
+            return self
         else:
             # Wait for the machine to be fully deployed
-            machine = type(self)(data)
-            while machine.status == NodeStatus.DEPLOYING:
+            while self.status == NodeStatus.DEPLOYING:
                 await asyncio.sleep(wait_interval)
-                data = await self._handler.read(system_id=self.system_id)
-                machine = type(self)(data)
-            if machine.status == NodeStatus.FAILED_DEPLOYMENT:
-                msg = "{system_id} failed to Deploy.".format(
-                    system_id=machine.system_id
+                self._data = await self._handler.read(system_id=self.system_id)
+            if self.status == NodeStatus.FAILED_DEPLOYMENT:
+                msg = "{system_id} failed to deploy.".format(
+                    system_id=self.system_id
                 )
-                raise FailedDeployment(msg, machine)
-            return machine
-
-    async def get_power_parameters(self):
-        data = await self._handler.power_parameters(system_id=self.system_id)
-        return data
-
-    async def release(self, comment: str=None, wait: bool=False,
-                      wait_interval: int=5):
-        """
-        Release the machine.
-
-        :param wait: If specified, wait until the deploy is complete.
-        :param wait_interval: How often to poll, defaults to 5 seconds
-        """
-        params = {"system_id": self.system_id}
-        if comment is not None:
-            params["comment"] = comment
-        data = await self._handler.release(**params)
-        if not wait:
-            return type(self)(data)
-        else:
-            # Wait for machine to be released
-            machine = type(self)(data)
-            while (machine.status == NodeStatus.RELEASING or
-                   machine.status == NodeStatus.DISK_ERASING):
-                await asyncio.sleep(wait_interval)
-                data = await self._handler.read(system_id=self.system_id)
-                machine = type(self)(data)
-            if machine.status == NodeStatus.FAILED_RELEASING:
-                msg = "{system_id} failed to be Released.".format(
-                    system_id=machine.system_id
-                )
-                raise FailedReleasing(msg, machine)
-            elif machine.status == NodeStatus.FAILED_DISK_ERASING:
-                msg = "{system_id} failed to erase disk.".format(
-                    system_id=machine.system_id
-                )
-                raise FailedDiskErasing(msg, machine)
-            return machine
+                raise FailedDeployment(msg, self)
+            return self
 
     async def enter_rescue_mode(self, wait: bool=False, wait_interval: int=5):
         """
@@ -285,7 +390,8 @@ class Machine(Object, metaclass=MachineType):
         :param wait_interval: How often to poll, defaults to 5 seconds
         """
         try:
-            data = await self._handler.rescue_mode(system_id=self.system_id)
+            self._data = await self._handler.rescue_mode(
+                system_id=self.system_id)
         except CallError as error:
             if error.status == HTTPStatus.FORBIDDEN:
                 message = "Not allowed to enter rescue mode"
@@ -294,20 +400,18 @@ class Machine(Object, metaclass=MachineType):
                 raise
 
         if not wait:
-            return type(self)(data)
+            return self
         else:
             # Wait for machine to finish entering rescue mode
-            machine = type(self)(data)
-            while machine.status == NodeStatus.ENTERING_RESCUE_MODE:
+            while self.status == NodeStatus.ENTERING_RESCUE_MODE:
                 await asyncio.sleep(wait)
-                data = await self._handler.read(system_id=self.system_id)
-                machine = type(self)(data)
-            if machine.status == NodeStatus.FAILED_ENTERING_RESCUE_MODE:
-                msg = "{system_id} failed to enter Rescue Mode.".format(
-                    system_id=machine.system_id
+                self._data = await self._handler.read(system_id=self.system_id)
+            if self.status == NodeStatus.FAILED_ENTERING_RESCUE_MODE:
+                msg = "{system_id} failed to enter rescue mode.".format(
+                    system_id=self.system_id
                 )
-                raise RescueModeFailure(msg, machine)
-            return machine
+                raise RescueModeFailure(msg, self)
+            return self
 
     async def exit_rescue_mode(self, wait: bool=False, wait_interval: int=5):
         """
@@ -317,7 +421,7 @@ class Machine(Object, metaclass=MachineType):
         :param wait_interval: How often to poll, defaults to 5 seconds
         """
         try:
-            data = await self._handler.exit_rescue_mode(
+            self._data = await self._handler.exit_rescue_mode(
                 system_id=self.system_id
             )
         except CallError as error:
@@ -327,20 +431,94 @@ class Machine(Object, metaclass=MachineType):
             else:
                 raise
         if not wait:
-            return type(self)(data)
+            return self
         else:
             # Wait for machine to finish exiting rescue mode
-            machine = type(self)(data)
-            while machine.status == NodeStatus.EXITING_RESCUE_MODE:
+            while self.status == NodeStatus.EXITING_RESCUE_MODE:
                 await asyncio.sleep(wait_interval)
-                data = await self._handler.read(system_id=self.system_id)
-                machine = type(self)(data)
-            if machine.status == NodeStatus.FAILED_EXITING_RESCUE_MODE:
-                msg = "{system_id} failed to exit Rescue Mode.".format(
-                    system_id=machine.system_id
+                self._data = await self._handler.read(system_id=self.system_id)
+            if self.status == NodeStatus.FAILED_EXITING_RESCUE_MODE:
+                msg = "{system_id} failed to exit rescue mode.".format(
+                    system_id=self.system_id
                 )
-                raise RescueModeFailure(msg, machine)
-            return machine
+                raise RescueModeFailure(msg, self)
+            return self
+
+    async def get_curtin_config(self):
+        """Get the curtin configuration.
+
+        :returns: Curtin configuration
+        :rtype: `str`
+        """
+        return self._handler.get_curtin_config(system_id=self.system_id)
+
+    async def get_details(self):
+        """Get machine details information.
+
+        :returns: Mapping of hardware details.
+        """
+        data = await self._handler.details(system_id=self.system_id)
+        return bson.loads(data)
+
+    async def mark_broken(self, *, comment: str=None):
+        """Mark broken.
+
+        :param comment: Reason machine is broken.
+        :type comment: `str`
+        """
+        params = {
+            "system_id": self.system_id
+        }
+        if comment:
+            params["comment"] = comment
+        self._data = await self._handler.mark_broken(**params)
+        return self
+
+    async def mark_fixed(self, *, comment: str=None):
+        """Mark fixes.
+
+        :param comment: Reason machine is fixed.
+        :type comment: `str`
+        """
+        params = {
+            "system_id": self.system_id
+        }
+        if comment:
+            params["comment"] = comment
+        self._data = await self._handler.mark_fixed(**params)
+        return self
+
+    async def release(
+            self, comment: str=None, wait: bool=False, wait_interval: int=5):
+        """
+        Release the machine.
+
+        :param wait: If specified, wait until the deploy is complete.
+        :param wait_interval: How often to poll, defaults to 5 seconds
+        """
+        params = {"system_id": self.system_id}
+        if comment is not None:
+            params["comment"] = comment
+        self._data = await self._handler.release(**params)
+        if not wait:
+            return self
+        else:
+            # Wait for machine to be released
+            while self.status in [
+                    NodeStatus.RELEASING, NodeStatus.DISK_ERASING]:
+                await asyncio.sleep(wait_interval)
+                self._data = await self._handler.read(system_id=self.system_id)
+            if self.status == NodeStatus.FAILED_RELEASING:
+                msg = "{system_id} failed to be released.".format(
+                    system_id=self.system_id
+                )
+                raise FailedReleasing(msg, self)
+            elif self.status == NodeStatus.FAILED_DISK_ERASING:
+                msg = "{system_id} failed to erase disk.".format(
+                    system_id=self.system_id
+                )
+                raise FailedDiskErasing(msg, self)
+            return self
 
     def __repr__(self):
         return super(Machine, self).__repr__(

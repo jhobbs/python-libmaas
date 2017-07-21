@@ -2,6 +2,7 @@
 
 from http import HTTPStatus
 from unittest.mock import Mock
+from xml.etree import ElementTree
 
 from maas.client.bones.testing.server import ApplicationBuilder
 from maas.client.utils.testing import make_Credentials
@@ -9,6 +10,7 @@ from maas.client.viscera import Origin
 from testtools.matchers import (
     ContainsDict,
     Equals,
+    IsInstance,
     MatchesStructure,
 )
 
@@ -30,6 +32,12 @@ def make_origin():
     return bind(machines.Machines, machines.Machine)
 
 
+def make_get_details_coroutine(system_id, return_value=''):
+    async def coroutine(system_id):
+        return return_value
+    return coroutine
+
+
 class TestMachine(TestCase):
 
     def test__string_representation_includes_only_system_id_and_hostname(self):
@@ -40,6 +48,139 @@ class TestMachine(TestCase):
         self.assertThat(repr(machine), Equals(
             "<Machine hostname=%(hostname)r system_id=%(system_id)r>"
             % machine._data))
+
+    def test__get_power_parameters(self):
+        machine = make_origin().Machine({
+            "system_id": make_name_without_spaces("system-id"),
+            "hostname": make_name_without_spaces("hostname"),
+        })
+        power_parameters = {
+            "key": make_name_without_spaces("value"),
+        }
+        machine._handler.power_parameters.return_value = power_parameters
+        self.assertThat(
+            machine.get_power_parameters(),
+            Equals(power_parameters),
+        )
+        machine._handler.power_parameters.assert_called_once_with(
+            system_id=machine.system_id
+        )
+
+    def test__abort(self):
+        data = {
+            "system_id": make_name_without_spaces("system-id"),
+            "hostname": make_name_without_spaces("hostname"),
+        }
+        origin = make_origin()
+        machine = origin.Machine(data)
+        machine._handler.abort.return_value = data
+        comment = make_name_without_spaces("comment")
+        self.assertThat(
+            machine.abort(comment=comment),
+            Equals(origin.Machine(data)))
+        machine._handler.abort.assert_called_once_with(
+            system_id=machine.system_id, comment=comment)
+
+    def test__clear_default_gateways(self):
+        data = {
+            "system_id": make_name_without_spaces("system-id"),
+            "hostname": make_name_without_spaces("hostname"),
+        }
+        origin = make_origin()
+        machine = origin.Machine(data)
+        machine._handler.clear_default_gateways.return_value = data
+        self.assertThat(
+            machine.clear_default_gateways(),
+            Equals(origin.Machine(data)))
+        machine._handler.clear_default_gateways.assert_called_once_with(
+            system_id=machine.system_id)
+
+    def test__commissioning_without_wait(self):
+        system_id = make_name_without_spaces("system-id")
+        hostname = make_name_without_spaces("hostname")
+        data = {
+            "system_id": system_id,
+            "hostname": hostname,
+            "status": NodeStatus.COMMISSIONING,
+        }
+        machine = make_origin().Machine(data)
+        machine._handler.commission.return_value = data
+        machine.commission()
+        self.assertThat(machine.status, Equals(NodeStatus.COMMISSIONING))
+        machine._handler.commission.assert_called_once_with(
+            system_id=machine.system_id
+        )
+
+    def test__commissioning_with_wait(self):
+        system_id = make_name_without_spaces("system-id")
+        hostname = make_name_without_spaces("hostname")
+        data = {
+            "system_id": system_id,
+            "hostname": hostname,
+            "status": NodeStatus.COMMISSIONING,
+        }
+        ready_data = {
+            "system_id": system_id,
+            "hostname": hostname,
+            "status": NodeStatus.READY,
+        }
+        machine = make_origin().Machine(data)
+        machine._handler.commission.return_value = data
+        machine._handler.read.return_value = ready_data
+        machine.commission(wait=True, wait_interval=0.1)
+        self.assertThat(machine.status, Equals(NodeStatus.READY))
+        machine._handler.commission.assert_called_once_with(
+            system_id=machine.system_id
+        )
+
+    def test__commissioning_and_testing_with_wait(self):
+        system_id = make_name_without_spaces("system-id")
+        hostname = make_name_without_spaces("hostname")
+        data = {
+            "system_id": system_id,
+            "hostname": hostname,
+            "status": NodeStatus.COMMISSIONING,
+        }
+        testing_data = {
+            "system_id": system_id,
+            "hostname": hostname,
+            "status": NodeStatus.TESTING,
+        }
+        ready_data = {
+            "system_id": system_id,
+            "hostname": hostname,
+            "status": NodeStatus.READY,
+        }
+        machine = make_origin().Machine(data)
+        machine._handler.commission.return_value = data
+        machine._handler.read.side_effect = [
+            testing_data,
+            ready_data,
+        ]
+        machine.commission(wait=True, wait_interval=0.1)
+        self.assertThat(machine.status, Equals(NodeStatus.READY))
+        machine._handler.commission.assert_called_once_with(
+            system_id=machine.system_id
+        )
+
+    def test__commission_with_wait_failed(self):
+        system_id = make_name_without_spaces("system-id")
+        hostname = make_name_without_spaces("hostname")
+        data = {
+            "system_id": system_id,
+            "hostname": hostname,
+            "status": NodeStatus.COMMISSIONING,
+        }
+        failed_commissioning_data = {
+            "system_id": system_id,
+            "hostname": hostname,
+            "status": NodeStatus.FAILED_COMMISSIONING,
+        }
+        machine = make_origin().Machine(data)
+        machine._handler.commission.return_value = data
+        machine._handler.read.return_value = failed_commissioning_data
+        self.assertRaises(machines.FailedCommissioning, machine.commission,
+                          wait=True, wait_interval=0.1)
 
     def test__deploy_with_wait(self):
         system_id = make_name_without_spaces("system-id")
@@ -55,11 +196,10 @@ class TestMachine(TestCase):
             "status": NodeStatus.DEPLOYED,
         }
         machine = make_origin().Machine(data)
-        deployed_machine = make_origin().Machine(deployed_data)
         machine._handler.deploy.return_value = data
         machine._handler.read.return_value = deployed_data
-        result = machine.deploy(wait=True, wait_interval=0.1)
-        self.assertThat(result.status, Equals(deployed_machine.status))
+        machine.deploy(wait=True, wait_interval=0.1)
+        self.assertThat(machine.status, Equals(NodeStatus.DEPLOYED))
         machine._handler.deploy.assert_called_once_with(
             system_id=machine.system_id
         )
@@ -82,23 +222,6 @@ class TestMachine(TestCase):
         machine._handler.read.return_value = failed_deploy_data
         self.assertRaises(machines.FailedDeployment, machine.deploy,
                           wait=True, wait_interval=0.1)
-
-    def test__get_power_parameters(self):
-        machine = make_origin().Machine({
-            "system_id": make_name_without_spaces("system-id"),
-            "hostname": make_name_without_spaces("hostname"),
-        })
-        power_parameters = {
-            "key": make_name_without_spaces("value"),
-        }
-        machine._handler.power_parameters.return_value = power_parameters
-        self.assertThat(
-            machine.get_power_parameters(),
-            Equals(power_parameters),
-        )
-        machine._handler.power_parameters.assert_called_once_with(
-            system_id=machine.system_id
-        )
 
     def test__enter_rescue_mode(self):
         rescue_mode_machine = {
@@ -252,6 +375,51 @@ class TestMachine(TestCase):
             machine.exit_rescue_mode, wait=True, wait_interval=0.1
         )
 
+    def test__get_curtin_config(self):
+        data = {
+            "system_id": make_name_without_spaces("system-id"),
+            "hostname": make_name_without_spaces("hostname"),
+        }
+        origin = make_origin()
+        machine = origin.Machine(data)
+        config = make_name_without_spaces("config")
+        machine._handler.get_curtin_config.return_value = config
+        self.assertThat(
+            machine.get_curtin_config(),
+            Equals(config))
+        machine._handler.get_curtin_config.assert_called_once_with(
+            system_id=machine.system_id)
+
+    def test__mark_broken(self):
+        data = {
+            "system_id": make_name_without_spaces("system-id"),
+            "hostname": make_name_without_spaces("hostname"),
+        }
+        origin = make_origin()
+        machine = origin.Machine(data)
+        machine._handler.mark_broken.return_value = data
+        comment = make_name_without_spaces("comment")
+        self.assertThat(
+            machine.mark_broken(comment=comment),
+            Equals(origin.Machine(data)))
+        machine._handler.mark_broken.assert_called_once_with(
+            system_id=machine.system_id, comment=comment)
+
+    def test__mark_fixed(self):
+        data = {
+            "system_id": make_name_without_spaces("system-id"),
+            "hostname": make_name_without_spaces("hostname"),
+        }
+        origin = make_origin()
+        machine = origin.Machine(data)
+        machine._handler.mark_fixed.return_value = data
+        comment = make_name_without_spaces("comment")
+        self.assertThat(
+            machine.mark_fixed(comment=comment),
+            Equals(origin.Machine(data)))
+        machine._handler.mark_fixed.assert_called_once_with(
+            system_id=machine.system_id, comment=comment)
+
     def test__release_with_wait(self):
         system_id = make_name_without_spaces("system-id")
         hostname = make_name_without_spaces("hostname")
@@ -321,6 +489,30 @@ class TestMachine(TestCase):
             wait_interval=0.1
         )
 
+    def test__get_details(self):
+        return_val = b'S\x01\x00\x00\x05lshw\x00\xf2\x00\x00\x00\x00<?xml' \
+                     b' version="1.0" standalone="yes" ?>\n<!-- generated by' \
+                     b' lshw-B.02.17 -->\n<!-- GCC 5.3.1 20160413 -->\n<!--' \
+                     b' Linux 4.8.0-34-generic #36~16.04.1-Ubuntu SMP Wed' \
+                     b' Dec 21 18:55:08 UTC 2016 x86_64 -->\n<!-- GNU libc 2' \
+                     b' (glibc 2.23) -->\n<list>\n</list>\n\x05lldp\x00F\x00' \
+                     b'\x00\x00\x00<?xml version="1.0" encoding="UTF-8"?>\n' \
+                     b'<lldp label="LLDP neighbors"/>\n\x00'
+        machine = make_origin().Machine({
+            "system_id": make_name_without_spaces("system-id"),
+            "hostname": make_name_without_spaces("hostname"),
+        })
+        machine._handler.details = make_get_details_coroutine(
+            machine.system_id,
+            return_value=return_val
+            )
+        data = machine.get_details()
+        self.assertItemsEqual(['lldp', 'lshw'], data.keys())
+        lldp = ElementTree.fromstring(data['lldp'])
+        lshw = ElementTree.fromstring(data['lshw'])
+        assert IsInstance(lldp, ElementTree)
+        assert IsInstance(lshw, ElementTree)
+
 
 class TestMachine_APIVersion(TestCase):
 
@@ -358,6 +550,29 @@ class TestMachine_APIVersion(TestCase):
 
 
 class TestMachines(TestCase):
+
+    def test__create(self):
+        origin = make_origin()
+        Machines, Machine = origin.Machines, origin.Machine
+        Machines._handler.create.return_value = {}
+        observed = Machines.create(
+            'amd64',
+            ['00:11:22:33:44:55', '00:11:22:33:44:AA'],
+            'ipmi',
+            {'power_address': 'localhost', 'power_user': 'root'},
+            subarchitecture='generic', min_hwe_kernel='hwe-x',
+            hostname='new-machine', domain='maas')
+        self.assertThat(observed, IsInstance(Machine))
+        Machines._handler.create.assert_called_once_with(
+            architecture='amd64',
+            mac_addresses=['00:11:22:33:44:55', '00:11:22:33:44:AA'],
+            power_type='ipmi',
+            power_parameters={
+                'power_address': 'localhost', 'power_user': 'root'},
+            subarchitecture='generic',
+            min_hwe_kernel='hwe-x',
+            hostname='new-machine',
+            domain='maas')
 
     def test__allocate(self):
         Machines = make_origin().Machines

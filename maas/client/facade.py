@@ -155,7 +155,7 @@ class Client:
         }
 
     @facade
-    def ipranges(origin):
+    def ip_ranges(origin):
         return {
             "create": origin.IPRanges.create,
             "get": origin.IPRange.read,
@@ -179,6 +179,7 @@ class Client:
     def machines(origin):
         return {
             "allocate": origin.Machines.allocate,
+            "create": origin.Machines.create,
             "get": origin.Machine.read,
             "list": origin.Machines.read,
             "get_power_parameters_for":
